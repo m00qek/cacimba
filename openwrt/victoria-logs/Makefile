@@ -2,7 +2,7 @@ include $(TOPDIR)/rules.mk
 
 PKG_NAME:=victoria-logs
 PKG_VERSION:=1.54.0
-PKG_RELEASE:=2
+PKG_RELEASE:=3
 
 # Upstream's own release build, one tarball per CPU: both aarch64 package
 # architectures run the arm64 one.
@@ -44,6 +44,18 @@ endef
 
 define Package/victoria-logs/conffiles
 /etc/config/victoria-logs
+endef
+
+# An upgrade replaces the files, not the running process: restart it, so
+# the version installed is the version running. Only if it is running, and
+# never into an image being built (IPKG_INSTROOT).
+define Package/victoria-logs/postinst
+#!/bin/sh
+if [ -z "$${IPKG_INSTROOT}" ] && [ "$${PKG_UPGRADE}" = 1 ] &&
+	/etc/init.d/victoria-logs running; then
+	/etc/init.d/victoria-logs restart
+fi
+exit 0
 endef
 
 # The tarball has no top directory: unpack it into the build directory.

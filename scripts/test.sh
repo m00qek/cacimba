@@ -38,6 +38,12 @@ for p in "$@"; do
 		mkdir -p /var/lock /var/run
 		apk update >/dev/null
 		apk add --allow-untrusted /pkgs/*.apk
+		# Every package here runs a service: an upgrade must restart it, or
+		# the old version keeps running under the new one.
+		for f in /pkgs/*.apk; do
+			apk adbdump "$f" | grep -q "init.d/.* restart" ||
+				{ echo "$f: its upgrade does not restart the service" >&2; exit 1; }
+		done
 		if [ -f /test.sh ]; then sh /test.sh; else echo "no test.sh: installed only"; fi
 	'
 done

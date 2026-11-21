@@ -2,7 +2,7 @@ include $(TOPDIR)/rules.mk
 
 PKG_NAME:=victoria-metrics
 PKG_VERSION:=1.156.0
-PKG_RELEASE:=2
+PKG_RELEASE:=3
 
 # Upstream's own release build, one tarball per CPU: both aarch64 package
 # architectures run the arm64 one.
@@ -43,6 +43,18 @@ endef
 
 define Package/victoria-metrics/conffiles
 /etc/config/victoria-metrics
+endef
+
+# An upgrade replaces the files, not the running process: restart it, so
+# the version installed is the version running. Only if it is running, and
+# never into an image being built (IPKG_INSTROOT).
+define Package/victoria-metrics/postinst
+#!/bin/sh
+if [ -z "$${IPKG_INSTROOT}" ] && [ "$${PKG_UPGRADE}" = 1 ] &&
+	/etc/init.d/victoria-metrics running; then
+	/etc/init.d/victoria-metrics restart
+fi
+exit 0
 endef
 
 # The tarball has no top directory: unpack it into the build directory.

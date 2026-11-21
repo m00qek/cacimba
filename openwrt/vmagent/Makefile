@@ -2,7 +2,7 @@ include $(TOPDIR)/rules.mk
 
 PKG_NAME:=vmagent
 PKG_VERSION:=1.156.0
-PKG_RELEASE:=3
+PKG_RELEASE:=4
 
 # Upstream's own release build, one tarball per CPU: both aarch64 package
 # architectures run the arm64 one. The tarball holds every vmutils tool;
@@ -45,6 +45,18 @@ endef
 define Package/vmagent/conffiles
 /etc/config/vmagent
 /etc/vmagent/scrape.yml
+endef
+
+# An upgrade replaces the files, not the running process: restart it, so
+# the version installed is the version running. Only if it is running, and
+# never into an image being built (IPKG_INSTROOT).
+define Package/vmagent/postinst
+#!/bin/sh
+if [ -z "$${IPKG_INSTROOT}" ] && [ "$${PKG_UPGRADE}" = 1 ] &&
+	/etc/init.d/vmagent running; then
+	/etc/init.d/vmagent restart
+fi
+exit 0
 endef
 
 # The tarball has no top directory: unpack it into the build directory.

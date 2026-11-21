@@ -83,6 +83,14 @@
         "aarch64_generic",
         "aarch64_cortex-a53"
       ]
+    },
+    "tinyauth": {
+      "build": "prebuilt",
+      "arches": [
+        "x86_64",
+        "aarch64_generic",
+        "aarch64_cortex-a53"
+      ]
     }
   }
 }

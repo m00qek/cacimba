@@ -21,9 +21,10 @@ CI fetches it, checks the hash, packages it, and publishes the result.
 
 | Package | Description | Architectures | Version |
 |---------|-------------|---------------|---------|
-| [vmagent](openwrt/vmagent) | [VictoriaMetrics agent](https://docs.victoriametrics.com/victoriametrics/vmagent/): scrapes Prometheus metrics and remote-writes them, queuing on disk per target | `x86_64`, `aarch64_generic`, `aarch64_cortex-a53` | 1.156.0-r3 |
-| [victoria-metrics](openwrt/victoria-metrics) | [VictoriaMetrics](https://docs.victoriametrics.com/victoriametrics/single-server-victoriametrics/) single-node time series database: Prometheus remote-write in, PromQL/MetricsQL out | `x86_64`, `aarch64_generic`, `aarch64_cortex-a53` | 1.156.0-r2 |
-| [victoria-logs](openwrt/victoria-logs) | [VictoriaLogs](https://docs.victoriametrics.com/victorialogs/) single-node log database: syslog, Loki, Elasticsearch and JSON-lines in, LogsQL out | `x86_64`, `aarch64_generic`, `aarch64_cortex-a53` | 1.54.0-r2 |
+| [vmagent](openwrt/vmagent) | [VictoriaMetrics agent](https://docs.victoriametrics.com/victoriametrics/vmagent/): scrapes Prometheus metrics and remote-writes them, queuing on disk per target | `x86_64`, `aarch64_generic`, `aarch64_cortex-a53` | 1.156.0-r4 |
+| [victoria-metrics](openwrt/victoria-metrics) | [VictoriaMetrics](https://docs.victoriametrics.com/victoriametrics/single-server-victoriametrics/) single-node time series database: Prometheus remote-write in, PromQL/MetricsQL out | `x86_64`, `aarch64_generic`, `aarch64_cortex-a53` | 1.156.0-r3 |
+| [victoria-logs](openwrt/victoria-logs) | [VictoriaLogs](https://docs.victoriametrics.com/victorialogs/) single-node log database: syslog, Loki, Elasticsearch and JSON-lines in, LogsQL out | `x86_64`, `aarch64_generic`, `aarch64_cortex-a53` | 1.54.0-r3 |
+| [tinyauth](openwrt/tinyauth) | [Tinyauth](https://tinyauth.app): a login page (local users, OAuth/OIDC, LDAP) in front of web apps, for a reverse proxy's forward auth | `x86_64`, `aarch64_generic`, `aarch64_cortex-a53` | 5.2.0-r1 |
 
 ### Adding the feed
 
@@ -40,6 +41,9 @@ apk add vmagent
 The packages and indexes are signed; the key above is the one in
 [`apk.pub`](apk.pub). To build it into an image, put it in the image's
 `/etc/apk/keys/` (ImageBuilder `FILES=`).
+
+Upgrading a package restarts its service if it is running, so the
+version installed is the version running.
 
 The feed keeps the three newest versions of each package, so the two before
 the current one can be installed by their URLs to roll back. The index lists the newest only.
@@ -132,6 +136,47 @@ config syslog
 
 It runs unprivileged, so a syslog port must be 1024 or above.
 
+### tinyauth
+
+Configured in `/etc/config/tinyauth`, like every package here. Tinyauth reads
+its settings from `TINYAUTH_*` environment variables, so the service turns
+its options into them, and takes any other tinyauth setting as an `env`
+entry. (Tinyauth also reads a YAML file, but only instead of the
+environment, never with it.) It does not start without an `app_url`.
+
+```sh
+uci set tinyauth.main.app_url=https://auth.example.com
+uci add_list tinyauth.main.env='TINYAUTH_OAUTH_PROVIDERS_POCKETID_NAME=Pocket ID'
+uci add_list tinyauth.main.env=TINYAUTH_OAUTH_PROVIDERS_POCKETID_CLIENTSECRETFILE=/etc/tinyauth/pocketid-secret
+uci commit tinyauth
+service tinyauth start
+```
+
+| Option | Default | Variable |
+|--------|---------|----------|
+| `enabled` | `1` | |
+| `app_url` | none: required, a domain | `TINYAUTH_APPURL` |
+| `address` | `127.0.0.1` | `TINYAUTH_SERVER_ADDRESS` |
+| `port` | `3000` | `TINYAUTH_SERVER_PORT` |
+| `data_dir` | `/var/lib/tinyauth` | its database, OIDC keys and resources |
+| `log_level` | `info` | `TINYAUTH_LOG_LEVEL` |
+| `analytics` | `0` | `TINYAUTH_ANALYTICS_ENABLED` |
+| `gomemlimit` | `64MiB` | `GOMEMLIMIT` |
+| `env` (list) | none | any other `TINYAUTH_*` setting, `NAME=value`; values may contain spaces |
+| `jail_mount`, `jail_mount_rw` (lists) | none | more paths in its jail |
+
+An `env` entry for a variable an option sets is refused, rather than one
+silently winning. Upstream listens on every address and reports its version
+home; here it listens on loopback, behind the reverse proxy, with analytics
+off. `data_dir` in RAM only signs everyone out on a reboot, so it has a
+default; use persistent storage if tinyauth is itself an OIDC provider, whose
+keys must not change.
+
+Its jail sees `/etc/tinyauth` read-only: keep secrets there as files and
+point the `*FILE` settings at them (`..._CLIENTSECRETFILE`,
+`TINYAUTH_AUTH_USERSFILE`, ...). It runs as the `tinyauth` user, so make them
+readable to it: `chgrp tinyauth secret && chmod 640 secret`.
+
 ## How the feed is built
 
 [`feed.json`](feed.json) lists the OpenWrt releases, their architectures,
@@ -159,10 +204,16 @@ sh scripts/test.sh openwrt/rootfs:x86_64-25.12.6 out vmagent
 
 ### Adding a package
 
+Every package is configured through UCI, `/etc/config/<name>`: its init
+script turns the options into the program's flags, environment or own
+configuration file at start, so there is one place to configure it, and
+tools that manage UCI manage it too.
+
 1. `openwrt/<name>/Makefile`: `PKG_SOURCE_URL` and `PKG_HASH` per CPU,
-   copied from upstream's checksums, and the install rules.
-2. `openwrt/<name>/files/`: its procd init script, UCI defaults, and any
-   default configuration, listed in `conffiles`.
+   copied from upstream's checksums, the install rules, and the `postinst`
+   that restarts the service on upgrade.
+2. `openwrt/<name>/files/`: its procd init script (validated options, its
+   own user, a ujail) and its UCI defaults, listed in `conffiles`.
 3. `openwrt/<name>/test.sh`: what can be checked without procd.
 4. An entry in `feed.json`, and a row above.
 
