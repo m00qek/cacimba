@@ -68,7 +68,10 @@ start_vmagent() {
 	fi
 
 	mkdir -p "$data_dir"
-	chown -R vmagent:vmagent "$data_dir"
+	# Handed over once, when it is not its own yet: re-owning every file on
+	# each start would walk the whole store (tens of thousands of files).
+	[ "$(ls -ld "$data_dir" | awk '{print $3}')" = vmagent ] ||
+		chown -R vmagent:vmagent "$data_dir"
 
 	procd_open_instance
 	procd_set_param command "$PROG" \

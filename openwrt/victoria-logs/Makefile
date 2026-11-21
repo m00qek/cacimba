@@ -2,7 +2,7 @@ include $(TOPDIR)/rules.mk
 
 PKG_NAME:=victoria-logs
 PKG_VERSION:=1.54.0
-PKG_RELEASE:=1
+PKG_RELEASE:=2
 
 # Upstream's own release build, one tarball per CPU: both aarch64 package
 # architectures run the arm64 one.

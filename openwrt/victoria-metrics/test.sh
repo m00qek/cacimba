@@ -35,6 +35,9 @@ echo "$out" | grep -q "no data_dir" || fail "no data_dir: $out"
 
 uci set victoria-metrics.main.data_dir=/srv/victoria-metrics
 uci commit victoria-metrics
+# A data_dir that already exists, owned by root: handed over, contents too.
+mkdir -p /srv/victoria-metrics
+touch /srv/victoria-metrics/before
 out=$(start) || fail "did not start: $out"
 for want in \
 	"set command /usr/bin/victoria-metrics -storageDataPath=/srv/victoria-metrics -retentionPeriod=30d -httpListenAddr=127.0.0.1:8428 -memory.allowedBytes=64MB -loggerLevel=INFO -loggerOutput=stdout" \
@@ -49,6 +52,11 @@ $out"
 done
 echo "$out" | grep -q "in RAM" && fail "warned about RAM for /srv: $out"
 [ "$(ls -ld /srv/victoria-metrics | awk '{print $3}')" = victoria-metrics ] || fail "data_dir not owned by victoria-metrics"
+[ "$(ls -l /srv/victoria-metrics/before | awk '{print $3}')" = victoria-metrics ] || fail "data_dir contents not handed over"
+# Once it is its own, a start does not walk it again.
+touch /srv/victoria-metrics/after
+start >/dev/null
+[ "$(ls -l /srv/victoria-metrics/after | awk '{print $3}')" = root ] || fail "re-owned data_dir on a later start"
 
 # The jail it asked for is enough to run in. ujail talks to ubus.
 pidof ubusd >/dev/null || { ubusd & sleep 1; }

@@ -45,6 +45,9 @@ uci add_list vmagent.main.remote_write=http://10.0.0.1:8428/api/v1/write
 uci add_list vmagent.main.label=site=test
 uci set vmagent.main.gomemlimit=96MiB
 uci commit vmagent
+# A data_dir that already exists, owned by root: handed over, contents too.
+mkdir -p /var/lib/vmagent
+touch /var/lib/vmagent/before
 out=$(start) || fail "did not start: $out"
 for want in \
 	"set command /usr/bin/vmagent -promscrape.config=/etc/vmagent/scrape.yml -remoteWrite.tmpDataPath=/var/lib/vmagent -remoteWrite.maxDiskUsagePerURL=16MB -httpListenAddr=127.0.0.1:8429 -loggerLevel=INFO -loggerOutput=stdout" \
@@ -65,6 +68,11 @@ for want in \
 $out"
 done
 [ "$(ls -ld /var/lib/vmagent | awk '{print $3}')" = vmagent ] || fail "data_dir not owned by vmagent"
+[ "$(ls -l /var/lib/vmagent/before | awk '{print $3}')" = vmagent ] || fail "data_dir contents not handed over"
+# Once it is its own, a start does not walk it again.
+touch /var/lib/vmagent/after
+start >/dev/null
+[ "$(ls -l /var/lib/vmagent/after | awk '{print $3}')" = root ] || fail "re-owned data_dir on a later start"
 
 # The jail it asked for is enough to run in: start vmagent in ujail as procd
 # would (needs a privileged container), with the same mounts, user and

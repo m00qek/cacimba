@@ -2,7 +2,7 @@ include $(TOPDIR)/rules.mk
 
 PKG_NAME:=vmagent
 PKG_VERSION:=1.156.0
-PKG_RELEASE:=2
+PKG_RELEASE:=3
 
 # Upstream's own release build, one tarball per CPU: both aarch64 package
 # architectures run the arm64 one. The tarball holds every vmutils tool;

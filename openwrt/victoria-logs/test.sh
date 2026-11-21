@@ -41,6 +41,9 @@ uci add victoria-logs syslog >/dev/null
 uci set victoria-logs.@syslog[-1].proto=udp
 uci set victoria-logs.@syslog[-1].listen=127.0.0.1:11515
 uci commit victoria-logs
+# A data_dir that already exists, owned by root: handed over, contents too.
+mkdir -p /srv/victoria-logs
+touch /srv/victoria-logs/before
 out=$(start) || fail "did not start: $out"
 for want in \
 	"set command /usr/bin/victoria-logs -storageDataPath=/srv/victoria-logs -retentionPeriod=7d -httpListenAddr=127.0.0.1:9428 -memory.allowedBytes=64MB -loggerLevel=INFO -loggerOutput=stdout" \
@@ -59,6 +62,11 @@ $out"
 done
 echo "$out" | grep -q "in RAM" && fail "warned about RAM for /srv: $out"
 [ "$(ls -ld /srv/victoria-logs | awk '{print $3}')" = victoria-logs ] || fail "data_dir not owned by victoria-logs"
+[ "$(ls -l /srv/victoria-logs/before | awk '{print $3}')" = victoria-logs ] || fail "data_dir contents not handed over"
+# Once it is its own, a start does not walk it again.
+touch /srv/victoria-logs/after
+start >/dev/null
+[ "$(ls -l /srv/victoria-logs/after | awk '{print $3}')" = root ] || fail "re-owned data_dir on a later start"
 
 # The jail it asked for is enough to run in. ujail talks to ubus.
 pidof ubusd >/dev/null || { ubusd & sleep 1; }
