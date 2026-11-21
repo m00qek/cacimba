@@ -1,0 +1,281 @@
+name: feed
+
+# Builds, tests and publishes the OpenWrt feed. feed.json lists the OpenWrt
+# releases, the architectures of each, and the packages under openwrt/:
+#
+#   "build": "prebuilt"  wraps an upstream release binary: built once per
+#                        architecture in its "arches", one job each, each
+#                        downloading the upstream build for that CPU
+#   "build": "noarch"    nothing architecture-specific: built once per
+#                        release
+#
+# Nothing is compiled: a package's Makefile names the upstream download and
+# its hash, and the SDK fetches it, checks it and packages it. The x86_64 and
+# noarch builds are installed in an OpenWrt rootfs container and run their
+# package's test.sh; a failed test stops that build's upload, and any failed
+# build stops the publish.
+#
+# A push or pull request builds the packages whose directory it changes, or
+# every package if it changes feed.json, this workflow or a script. A manual
+# run builds the packages it names, or all of them. Every run also builds
+# the packages whose current version gh-pages is missing, e.g. after a
+# cancelled publish. Only main publishes.
+
+on:
+  push:
+    branches: [main]
+    paths-ignore:
+      - '**/*.md'
+      - '.gitignore'
+  pull_request:
+    branches: [main]
+    paths-ignore:
+      - '**/*.md'
+      - '.gitignore'
+  workflow_dispatch:
+    inputs:
+      packages:
+        description: Packages to build and publish, space-separated; empty builds all
+        type: string
+        default: ''
+
+concurrency:
+  group: feed-${{ github.ref }}
+  # A newer push to a pull request makes its older build moot; on main every
+  # run publishes, so none is cancelled.
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  plan:
+    name: Plan
+    runs-on: ubuntu-latest
+    outputs:
+      builds: ${{ steps.plan.outputs.builds }}
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+
+      - name: Choose the packages and the build jobs
+        id: plan
+        env:
+          EVENT: ${{ github.event_name }}
+          INPUT: ${{ inputs.packages }}
+          BEFORE: ${{ github.event.before }}
+          BASE: ${{ github.event.pull_request.base.sha }}
+        run: |
+          set -eu
+          all=$(jq -r '.packages | keys[]' feed.json)
+
+          # feed.json and the package directories must agree, and name builds
+          # and architectures that exist.
+          for m in openwrt/*/Makefile; do
+            [ -f "$m" ] || continue
+            d=$(basename "$(dirname "$m")")
+            printf '%s\n' "$all" | grep -qx "$d" || { echo "::error file=feed.json::openwrt/$d/ is not in feed.json"; exit 1; }
+          done
+          for p in $all; do
+            [ -f "openwrt/$p/Makefile" ] || { echo "::error file=feed.json::$p has no openwrt/$p/Makefile"; exit 1; }
+          done
+          bad=$(jq -r '[.releases[].arches[].pkg] as $known | .packages | to_entries[] |
+            select((.value.build | IN("noarch", "prebuilt") | not) or
+                   (.value.build == "prebuilt" and ((.value.arches // []) | length == 0)) or
+                   (.value.build == "noarch" and .value.arches != null) or
+                   ([(.value.arches // [])[] | select(IN($known[]) | not)] | length > 0)) | .key' feed.json)
+          [ -z "$bad" ] || { echo "::error file=feed.json::bad build or arches for: $bad"; exit 1; }
+          bad=$(jq -r '.releases | to_entries[] | .key as $r | .value["index-arches"] as $i |
+            .value.arches[].pkg | select(IN($i[]) | not) | "\($r)/\(.)"' feed.json)
+          [ -z "$bad" ] || { echo "::error file=feed.json::built but not in index-arches: $bad"; exit 1; }
+
+          # Changes to these rebuild everything.
+          shared='^(feed\.json|\.github/workflows/feed\.yml|scripts/[^/]+\.sh)$'
+          case "$EVENT" in
+            workflow_dispatch)
+              selected=${INPUT:-$all}
+              for p in $selected; do
+                printf '%s\n' "$all" | grep -qx "$p" || { echo "::error::$p is not a package in feed.json"; exit 1; }
+              done ;;
+            *)
+              base=${BASE:-$BEFORE}
+              if [ -z "$base" ] || ! git cat-file -e "$base^{commit}" 2>/dev/null; then
+                echo "No base commit to compare with: building everything"
+                selected=$all
+              else
+                changed=$(git diff --name-only "$base" "$GITHUB_SHA" | grep -v '\.md$' || true)
+                if printf '%s\n' "$changed" | grep -qE "$shared"; then
+                  selected=$all
+                else
+                  selected=$(for p in $all; do
+                    if printf '%s\n' "$changed" | grep -q "^openwrt/$p/"; then echo "$p"; fi
+                  done)
+                fi
+              fi ;;
+          esac
+          # Also every package whose current version is missing from a
+          # directory gh-pages should have it in: a publish that was
+          # cancelled or failed is built again by the next run, rather than
+          # waiting for the package's next change.
+          tree=$(git ls-tree -r --name-only origin/gh-pages 2>/dev/null || true)
+          if [ -z "$tree" ]; then
+            echo "::warning::no gh-pages branch to compare with"
+          else
+            missing=$(for p in $all; do
+              mk=openwrt/$p/Makefile
+              n=$(sed -n 's/^PKG_NAME:=//p' "$mk")
+              v=$(sed -n 's/^PKG_VERSION:=//p' "$mk")
+              r=$(sed -n 's/^PKG_RELEASE:=//p' "$mk")
+              arches=$(jq -r --arg p "$p" '.packages[$p] | if .build == "noarch" then "noarch" else .arches[] end' feed.json)
+              for rel in $(jq -r '.releases | keys[]' feed.json); do
+                for a in $arches; do
+                  printf '%s\n' "$tree" | grep -qxF "openwrt/$rel/$a/$n-$v-r$r.apk" || { echo "$p ($rel/$a)"; break 2; }
+                done
+              done
+            done)
+            if [ -n "$missing" ]; then
+              echo "Not published yet, so built too:"
+              printf '%s\n' "$missing" | sed 's/^/  /'
+              selected="$selected $(printf '%s\n' "$missing" | cut -d' ' -f1)"
+            fi
+          fi
+          selected=$(printf '%s\n' $selected | sort -u | jq -R . | jq -sc 'map(select(. != ""))')
+          echo "Packages: $selected"
+
+          # Per release: one noarch job for its noarch packages, and one job
+          # per architecture for the prebuilt packages built for it.
+          jq -c --argjson sel "$selected" '. as $m | [
+            $m.releases | to_entries[] | .key as $rel | .value as $r |
+            ([$sel[] | select($m.packages[.].build == "noarch")] | join(" ") | select(. != "") |
+               {release: $rel, arch: "noarch", image: "openwrt/sdk:x86-64-\($r.sdk)",
+                rootfs: "openwrt/rootfs:x86_64-\($r.sdk)", packages: .}),
+            ($r.arches[] | . as $a |
+               [$sel[] | select($m.packages[.].build == "prebuilt" and
+                                ($m.packages[.].arches | index($a.pkg)))] | join(" ") | select(. != "") |
+               {release: $rel, arch: $a.pkg, image: "openwrt/sdk:\($a.sdk)-\($r.sdk)",
+                rootfs: (if $a.pkg == "x86_64" then "openwrt/rootfs:x86_64-\($r.sdk)" else "" end),
+                packages: .})
+          ]' feed.json > "$RUNNER_TEMP/builds.json"
+          jq . "$RUNNER_TEMP/builds.json"
+          echo "builds=$(jq -c . "$RUNNER_TEMP/builds.json")" >> "$GITHUB_OUTPUT"
+
+  build:
+    name: Build ${{ matrix.release }} ${{ matrix.arch }}
+    needs: plan
+    if: needs.plan.outputs.builds != '[]'
+    runs-on: ubuntu-latest
+    strategy:
+      # One architecture failing does not stop the others from building, so
+      # every failure of a run is seen at once.
+      fail-fast: false
+      matrix:
+        include: ${{ fromJSON(needs.plan.outputs.builds) }}
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Build ${{ matrix.packages }}
+        run: sh scripts/build.sh "${{ matrix.release }}" "${{ matrix.image }}" "${{ matrix.arch }}" "out/build-${{ matrix.release }}-${{ matrix.arch }}" ${{ matrix.packages }}
+
+      # Only where the runner can run the binaries: x86_64, and noarch.
+      - name: Test ${{ matrix.packages }}
+        if: matrix.rootfs != ''
+        run: sh scripts/test.sh "${{ matrix.rootfs }}" "out/build-${{ matrix.release }}-${{ matrix.arch }}" ${{ matrix.packages }}
+
+      # The artifact holds build-<release>-<arch>/<package>/, its own name
+      # included, so publish finds it there however many artifacts it gets.
+      - uses: actions/upload-artifact@v7
+        with:
+          name: build-${{ matrix.release }}-${{ matrix.arch }}
+          path: out/
+
+  publish:
+    name: Publish to feed
+    needs: [plan, build]
+    # Every build must have passed: a package is published for all of its
+    # architectures or none.
+    if: needs.build.result == 'success' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    # Every push to gh-pages goes through this job, and two at once would
+    # clobber each other's index.
+    concurrency:
+      group: feed-gh-pages
+      cancel-in-progress: false
+    steps:
+      # main, at the commit that triggered this run, for scripts/ and the
+      # public key.
+      - uses: actions/checkout@v6
+
+      # gh-pages, the feed itself, in site/; empty on the very first publish.
+      - name: Check out gh-pages
+        run: |
+          set -eu
+          url=$(git remote get-url origin)
+          if git ls-remote --exit-code --heads origin gh-pages >/dev/null; then
+            git clone --quiet --depth 1 --branch gh-pages \
+              -c http.extraheader="$(git config --get http.https://github.com/.extraheader)" "$url" site
+          else
+            echo "::notice::no gh-pages yet: starting the feed"
+            git init --quiet site
+            git -C site remote add origin "$url"
+            git -C site config http.extraheader "$(git config --get http.https://github.com/.extraheader)"
+          fi
+          mkdir -p site/openwrt
+          touch site/.nojekyll
+
+      # Merged into dl/: each artifact brings its build-<release>-<arch>/
+      # directory.
+      - uses: actions/download-artifact@v8
+        with:
+          path: dl
+          pattern: build-*
+          merge-multiple: true
+
+      # build-<release>-<arch>/<package>/ -> staging/<release>/<arch>/.
+      - name: Stage the packages
+        run: |
+          set -eu
+          for d in dl/build-*/; do
+            name=$(basename "$d")                   # build-<release>-<arch>
+            release=${name#build-}; release=${release%%-*}
+            arch=${name#build-"$release"-}
+            for p in "$d"*/; do
+              mkdir -p "staging/$release/$arch"
+              cp "$p"* "staging/$release/$arch/"
+            done
+          done
+          find staging -type f | sort
+
+      # scripts/publish.sh holds the feed layout, the signing and the index
+      # rules: it files the packages, never replacing a published file,
+      # keeps the two newest versions of each, and regenerates and signs
+      # every index.
+      - name: File the packages and regenerate the indexes
+        env:
+          APK_FEED_SIGNING_KEY: ${{ secrets.APK_FEED_SIGNING_KEY }}
+        run: |
+          set -eu
+          [ -n "$APK_FEED_SIGNING_KEY" ] || { echo "::error::APK_FEED_SIGNING_KEY is not set: refusing to publish unsigned packages"; exit 1; }
+          sh scripts/publish.sh file staging site/openwrt
+          sh scripts/publish.sh prune --keep 2 site/openwrt
+          sh scripts/publish.sh index --manifest feed.json --pubkeys . site/openwrt
+
+      # gh-pages holds only the current feed: one commit, replaced on every
+      # publish, so the old versions of large binaries do not stay in its
+      # history after the prune has removed them from the feed.
+      - name: Replace gh-pages
+        working-directory: site
+        env:
+          PACKAGES: ${{ join(fromJSON(needs.plan.outputs.builds).*.packages, ' ') }}
+        run: |
+          set -eu
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add -A
+          if git rev-parse -q --verify HEAD >/dev/null && git diff --cached --quiet HEAD; then
+            echo "the feed is unchanged"
+            exit 0
+          fi
+          pkgs=$(printf '%s\n' $PACKAGES | sort -u | paste -sd ' ' -)
+          git checkout --quiet --orphan next
+          git commit --quiet -m "publish $pkgs from ${GITHUB_SHA::8}"
+          git push --force origin next:gh-pages

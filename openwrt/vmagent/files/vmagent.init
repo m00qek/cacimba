@@ -1,0 +1,135 @@
+#!/bin/sh /etc/rc.common
+# vmagent: scrapes Prometheus targets and remote-writes the samples.
+# Configured in /etc/config/vmagent; what to scrape is in its `config` file.
+
+USE_PROCD=1
+START=96
+STOP=09
+
+PROG=/usr/bin/vmagent
+
+# The options, their types and defaults, in one place: start_service reads
+# them through this, and `ubus call service validate` reports bad values.
+validate_vmagent_section() {
+	uci_load_validate vmagent vmagent "$1" "$2" \
+		'enabled:bool:1' \
+		'config:string:/etc/vmagent/scrape.yml' \
+		'remote_write:list(string)' \
+		'label:list(string)' \
+		'data_dir:string:/var/lib/vmagent' \
+		'max_disk_per_url:string:16MB' \
+		'listen:string:127.0.0.1:8429' \
+		'memory_allowed:string:32MB' \
+		'gomemlimit:string:64MiB' \
+		'log_level:or("INFO", "WARN", "ERROR"):INFO' \
+		'extra_args:list(string)' \
+		'jail_mount:list(string)' \
+		'jail_mount_rw:list(string)'
+}
+
+# mount_missing DIR: DIR is under a mount point /etc/config/fstab declares,
+# and that mount is not mounted yet.
+mount_missing() {
+	local target
+	for target in $(procd_get_mountpoints "$1"); do
+		grep -q " $target " /proc/mounts || return 0
+	done
+	return 1
+}
+
+start_vmagent() {
+	local arg
+
+	if [ "$2" != 0 ]; then
+		echo "vmagent: invalid configuration in /etc/config/vmagent, not starting" >&2
+		return 1
+	fi
+	[ "$enabled" = 1 ] || return 0
+
+	# Nothing to write to is a configuration error, not a reason to scrape
+	# into a queue no one drains.
+	if [ -z "$remote_write" ]; then
+		echo "vmagent: no remote_write in /etc/config/vmagent, not starting" >&2
+		return 1
+	fi
+	if [ ! -f "$config" ]; then
+		echo "vmagent: no scrape config $config, not starting" >&2
+		return 1
+	fi
+	# Its queue on storage that is not mounted yet would land on the
+	# overlay. service_triggers starts it when the mount appears.
+	if mount_missing "$data_dir"; then
+		echo "vmagent: $data_dir is not mounted yet, waiting for it" >&2
+		return 0
+	fi
+
+	mkdir -p "$data_dir"
+	chown -R vmagent:vmagent "$data_dir"
+
+	procd_open_instance
+	procd_set_param command "$PROG" \
+		-promscrape.config="$config" \
+		-remoteWrite.tmpDataPath="$data_dir" \
+		-remoteWrite.maxDiskUsagePerURL="$max_disk_per_url" \
+		-httpListenAddr="$listen" \
+		-loggerLevel="$log_level" \
+		-loggerOutput=stdout
+	for arg in $remote_write; do
+		procd_append_param command -remoteWrite.url="$arg"
+	done
+	for arg in $label; do
+		procd_append_param command -remoteWrite.label="$arg"
+	done
+	[ -n "$memory_allowed" ] && procd_append_param command -memory.allowedBytes="$memory_allowed"
+	for arg in $extra_args; do
+		procd_append_param command "$arg"
+	done
+	[ -n "$gomemlimit" ] && procd_set_param env GOMEMLIMIT="$gomemlimit"
+
+	# Its own mount namespace: it sees only what it reads and writes. A
+	# static binary needs no libraries; names resolve through the resolver
+	# config and /etc/hosts. Files the scrape config refers to (CA files,
+	# password files) go in jail_mount.
+	procd_add_jail vmagent log procfs requirejail
+	procd_add_jail_mount "$config" /etc/ssl/certs /etc/hosts
+	# The jail is required, so a path that does not exist must not be in it.
+	for arg in /etc/resolv.conf /tmp/resolv.conf /tmp/resolv.conf.d; do
+		[ -e "$arg" ] && procd_add_jail_mount "$arg"
+	done
+	procd_add_jail_mount_rw "$data_dir"
+	for arg in $jail_mount; do
+		procd_add_jail_mount "$arg"
+	done
+	for arg in $jail_mount_rw; do
+		procd_add_jail_mount_rw "$arg"
+	done
+
+	procd_set_param user vmagent
+	procd_set_param group vmagent
+	procd_set_param no_new_privs 1
+	# On SIGTERM vmagent flushes its in-memory buffers to the disk queue;
+	# procd's default of 5 seconds before SIGKILL can cut that short.
+	procd_set_param term_timeout 30
+	# A changed scrape config restarts it on the next reload.
+	procd_set_param file "$config"
+	procd_set_param stdout 1
+	procd_set_param stderr 1
+	procd_set_param respawn 3600 5 0
+	procd_close_instance
+}
+
+start_service() {
+	validate_vmagent_section main start_vmagent
+}
+
+service_triggers() {
+	local data_dir
+
+	procd_add_reload_trigger vmagent
+
+	config_load vmagent
+	config_get data_dir main data_dir /var/lib/vmagent
+	procd_add_restart_mount_trigger "$data_dir"
+
+	procd_add_validation validate_vmagent_section
+}
