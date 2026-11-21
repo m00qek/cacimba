@@ -247,7 +247,7 @@ jobs:
 
       # scripts/publish.sh holds the feed layout, the signing and the index
       # rules: it files the packages, never replacing a published file,
-      # keeps the two newest versions of each, and regenerates and signs
+      # keeps the three newest versions of each, and regenerates and signs
       # every index.
       - name: File the packages and regenerate the indexes
         env:
@@ -256,7 +256,7 @@ jobs:
           set -eu
           [ -n "$APK_FEED_SIGNING_KEY" ] || { echo "::error::APK_FEED_SIGNING_KEY is not set: refusing to publish unsigned packages"; exit 1; }
           sh scripts/publish.sh file staging site/openwrt
-          sh scripts/publish.sh prune --keep 2 site/openwrt
+          sh scripts/publish.sh prune --keep 3 site/openwrt
           sh scripts/publish.sh index --manifest feed.json --pubkeys . site/openwrt
 
       # gh-pages holds only the current feed: one commit, replaced on every

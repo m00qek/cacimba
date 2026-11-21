@@ -28,7 +28,8 @@ CI fetches it, checks the hash, packages it, and publishes the result.
 ```sh
 wget -O /etc/apk/keys/cacimba.pem \
   https://m00qek.github.io/cacimba/openwrt/25.12/feed.pub.pem
-echo https://m00qek.github.io/cacimba/openwrt/25.12/packages.adb \
+. /etc/openwrt_release
+echo "https://m00qek.github.io/cacimba/openwrt/25.12/$DISTRIB_ARCH/packages.adb" \
   >> /etc/apk/repositories.d/customfeeds.list
 apk update
 apk add vmagent
@@ -38,8 +39,8 @@ The packages and indexes are signed; the key above is the one in
 [`apk.pub`](apk.pub). To build it into an image, put it in the image's
 `/etc/apk/keys/` (ImageBuilder `FILES=`).
 
-The feed keeps the two newest versions of each package, so the previous one
-can be installed by its URL to roll back. The index lists the newest only.
+The feed keeps the three newest versions of each package, so the two before
+the current one can be installed by their URLs to roll back. The index lists the newest only.
 
 ### vmagent
 

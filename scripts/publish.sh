@@ -19,8 +19,8 @@
 #       stays downloadable as it was.
 #
 #   publish.sh prune [--keep N] FEED
-#       Delete all but the newest N (default 2) versions of each package in
-#       each directory of FEED: the current one, and one to roll back to.
+#       Delete all but the newest N (default 3) versions of each package in
+#       each directory of FEED: the current one, and two to roll back to.
 #
 #   publish.sh index [--manifest FEED_JSON] [--pubkeys DIR] FEED
 #       Regenerate and sign every index in FEED. Each index lists only the
@@ -149,7 +149,7 @@ cmd_file() {
 # --------------------------------------------------------------------- prune
 
 cmd_prune() {
-	keep=2
+	keep=3
 	if [ "${1:-}" = --keep ]; then
 		keep=$2
 		shift 2
