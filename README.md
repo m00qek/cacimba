@@ -22,6 +22,8 @@ CI fetches it, checks the hash, packages it, and publishes the result.
 | Package | Description | Architectures | Version |
 |---------|-------------|---------------|---------|
 | [vmagent](openwrt/vmagent) | [VictoriaMetrics agent](https://docs.victoriametrics.com/victoriametrics/vmagent/): scrapes Prometheus metrics and remote-writes them, queuing on disk per target | `x86_64`, `aarch64_generic`, `aarch64_cortex-a53` | 1.156.0-r1 |
+| [victoria-metrics](openwrt/victoria-metrics) | [VictoriaMetrics](https://docs.victoriametrics.com/victoriametrics/single-server-victoriametrics/) single-node time series database: Prometheus remote-write in, PromQL/MetricsQL out | `x86_64`, `aarch64_generic`, `aarch64_cortex-a53` | 1.156.0-r1 |
+| [victoria-logs](openwrt/victoria-logs) | [VictoriaLogs](https://docs.victoriametrics.com/victorialogs/) single-node log database: syslog, Loki, Elasticsearch and JSON-lines in, LogsQL out | `x86_64`, `aarch64_generic`, `aarch64_cortex-a53` | 1.54.0-r1 |
 
 ### Adding the feed
 
@@ -87,6 +89,48 @@ files: a file the scrape configuration refers to, such as a `ca_file`, needs
 a `jail_mount` entry. A changed scrape configuration restarts it on
 `service vmagent reload`. `ubus call service validate` reports invalid
 options; `extra_args` entries cannot contain spaces.
+
+### victoria-metrics and victoria-logs
+
+Both are configured in their `/etc/config/<name>`, and neither starts until
+`data_dir` is set: a database needs storage that survives a reboot, and only
+you know where that is (a USB disk, an SD card; flash wears out under a
+database's writes). A `data_dir` in RAM (`/tmp`, `/var`) starts, with a
+warning in the log.
+
+```sh
+uci set victoria-metrics.main.data_dir=/mnt/data/victoria-metrics
+uci commit victoria-metrics
+service victoria-metrics start
+```
+
+| Option | victoria-metrics | victoria-logs | Flag |
+|--------|------------------|---------------|------|
+| `enabled` | `1` | `1` | |
+| `data_dir` | none: required | none: required | `-storageDataPath` |
+| `retention` | `30d` | `7d` | `-retentionPeriod` |
+| `listen` | `127.0.0.1:8428` | `127.0.0.1:9428` | `-httpListenAddr` |
+| `memory_allowed` | `64MB` | `64MB` | `-memory.allowedBytes` |
+| `gomemlimit` | `128MiB` | `128MiB` | `GOMEMLIMIT` |
+| `log_level` | `INFO` | `INFO` | `-loggerLevel` |
+| `extra_args`, `jail_mount`, `jail_mount_rw` (lists) | none | none | as for vmagent |
+
+Neither has authentication of its own, so both listen on loopback by
+default. Like vmagent, each runs in a ujail as its own user, which owns
+`data_dir`, waits for `data_dir`'s mount when it is declared in
+`/etc/config/fstab`, and gets 60 seconds to flush to disk when stopped.
+
+victoria-logs takes syslog in through `syslog` sections, one per input. The
+tenant is the `AccountID:ProjectID` the input's logs are stored under:
+
+```
+config syslog
+	option proto 'tcp'              # or udp
+	option listen '127.0.0.1:1514'
+	option tenant '0:0'
+```
+
+It runs unprivileged, so a syslog port must be 1024 or above.
 
 ## How the feed is built
 

@@ -67,6 +67,22 @@
         "aarch64_generic",
         "aarch64_cortex-a53"
       ]
+    },
+    "victoria-metrics": {
+      "build": "prebuilt",
+      "arches": [
+        "x86_64",
+        "aarch64_generic",
+        "aarch64_cortex-a53"
+      ]
+    },
+    "victoria-logs": {
+      "build": "prebuilt",
+      "arches": [
+        "x86_64",
+        "aarch64_generic",
+        "aarch64_cortex-a53"
+      ]
     }
   }
 }

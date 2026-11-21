@@ -18,7 +18,7 @@ validate_vmagent_section() {
 		'label:list(string)' \
 		'data_dir:string:/var/lib/vmagent' \
 		'max_disk_per_url:string:16MB' \
-		'listen:string:127.0.0.1:8429' \
+		'listen:string' \
 		'memory_allowed:string:32MB' \
 		'gomemlimit:string:64MiB' \
 		'log_level:or("INFO", "WARN", "ERROR"):INFO' \
@@ -45,6 +45,10 @@ start_vmagent() {
 		return 1
 	fi
 	[ "$enabled" = 1 ] || return 0
+
+	# Defaults with a colon are set here: uci_load_validate cuts a default at
+	# its first colon (127.0.0.1:8428 would become 127.0.0.1).
+	: "${listen:=127.0.0.1:8429}"
 
 	# Nothing to write to is a configuration error, not a reason to scrape
 	# into a queue no one drains.

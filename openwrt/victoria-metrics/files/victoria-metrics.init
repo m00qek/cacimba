@@ -1,0 +1,128 @@
+#!/bin/sh /etc/rc.common
+# victoria-metrics: a single-node VictoriaMetrics time series database.
+# Configured in /etc/config/victoria-metrics.
+
+USE_PROCD=1
+START=95
+STOP=10
+
+PROG=/usr/bin/victoria-metrics
+NAME=victoria-metrics
+
+# The options, their types and defaults, in one place: start_service reads
+# them through this, and `ubus call service validate` reports bad values.
+validate_victoria_metrics_section() {
+	uci_load_validate victoria-metrics victoria-metrics "$1" "$2" \
+		'enabled:bool:1' \
+		'data_dir:string' \
+		'retention:string:30d' \
+		'listen:string' \
+		'memory_allowed:string:64MB' \
+		'gomemlimit:string:128MiB' \
+		'log_level:or("INFO", "WARN", "ERROR"):INFO' \
+		'extra_args:list(string)' \
+		'jail_mount:list(string)' \
+		'jail_mount_rw:list(string)'
+}
+
+# mount_missing DIR: DIR is under a mount point /etc/config/fstab declares,
+# and that mount is not mounted yet.
+mount_missing() {
+	local target
+	for target in $(procd_get_mountpoints "$1"); do
+		grep -q " $target " /proc/mounts || return 0
+	done
+	return 1
+}
+
+# fs_type DIR: the type of the filesystem DIR is on, or would be on.
+fs_type() {
+	awk -v d="${1%/}/" '{
+		t = ($2 == "/") ? "/" : $2 "/"
+		if (index(d, t) == 1 && length(t) > best) { best = length(t); type = $3 }
+	} END { print type }' /proc/mounts
+}
+
+start_victoria_metrics() {
+	local arg
+
+	if [ "$2" != 0 ]; then
+		echo "$NAME: invalid configuration in /etc/config/$NAME, not starting" >&2
+		return 1
+	fi
+	[ "$enabled" = 1 ] || return 0
+
+	# Defaults with a colon are set here: uci_load_validate cuts a default at
+	# its first colon (127.0.0.1:8428 would become 127.0.0.1).
+	: "${listen:=127.0.0.1:8428}"
+
+	# A database needs a place that survives a reboot, and only its owner
+	# knows where that is: no default, on purpose.
+	if [ -z "$data_dir" ]; then
+		echo "$NAME: no data_dir in /etc/config/$NAME, not starting" >&2
+		return 1
+	fi
+	# Its storage not mounted yet would land on the overlay.
+	# service_triggers starts it when the mount appears.
+	if mount_missing "$data_dir"; then
+		echo "$NAME: $data_dir is not mounted yet, waiting for it" >&2
+		return 0
+	fi
+	case "$(fs_type "$data_dir")" in
+		tmpfs | ramfs)
+			echo "$NAME: $data_dir is in RAM: its data will not survive a reboot" >&2 ;;
+	esac
+
+	mkdir -p "$data_dir"
+	chown -R "$NAME:$NAME" "$data_dir"
+
+	procd_open_instance
+	procd_set_param command "$PROG" \
+		-storageDataPath="$data_dir" \
+		-retentionPeriod="$retention" \
+		-httpListenAddr="$listen" \
+		-memory.allowedBytes="$memory_allowed" \
+		-loggerLevel="$log_level" \
+		-loggerOutput=stdout
+	for arg in $extra_args; do
+		procd_append_param command "$arg"
+	done
+	[ -n "$gomemlimit" ] && procd_set_param env GOMEMLIMIT="$gomemlimit"
+
+	# Its own mount namespace: it sees only its data.
+	procd_add_jail "$NAME" log procfs requirejail
+	procd_add_jail_mount_rw "$data_dir"
+	for arg in $jail_mount; do
+		procd_add_jail_mount "$arg"
+	done
+	for arg in $jail_mount_rw; do
+		procd_add_jail_mount_rw "$arg"
+	done
+
+	procd_set_param user "$NAME"
+	procd_set_param group "$NAME"
+	procd_set_param no_new_privs 1
+	# On SIGTERM it flushes recent samples to disk; procd's default of 5
+	# seconds before SIGKILL can cut that short.
+	procd_set_param term_timeout 60
+	procd_set_param stdout 1
+	procd_set_param stderr 1
+	procd_set_param respawn 3600 5 0
+	procd_close_instance
+}
+
+start_service() {
+	validate_victoria_metrics_section main start_victoria_metrics
+}
+
+service_triggers() {
+	local data_dir
+
+	procd_add_reload_trigger victoria-metrics
+
+	config_load victoria-metrics
+	config_get data_dir main data_dir
+	[ -n "$data_dir" ] && procd_add_restart_mount_trigger "$data_dir"
+
+	procd_add_validation validate_victoria_metrics_section
+}

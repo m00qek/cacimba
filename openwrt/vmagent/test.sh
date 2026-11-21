@@ -86,6 +86,14 @@ kill "$pid" 2>/dev/null || true
 [ "$health" = OK ] || fail "vmagent did not come up in its jail:
 $(cat /tmp/vmagent.log)"
 
+# Without a listen option it falls back to its default, port included.
+uci delete vmagent.main.listen
+uci commit vmagent
+out=$(start) || fail "did not start without a listen option: $out"
+echo "$out" | grep -q -- "-httpListenAddr=127.0.0.1:8429 " || fail "wrong default listen: $out"
+uci set vmagent.main.listen=127.0.0.1:8429
+uci commit vmagent
+
 uci set vmagent.main.enabled=maybe
 uci commit vmagent
 out=$(start) && fail "started with enabled=maybe"
