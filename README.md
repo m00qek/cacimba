@@ -25,6 +25,8 @@ CI fetches it, checks the hash, packages it, and publishes the result.
 | [victoria-metrics](openwrt/victoria-metrics) | [VictoriaMetrics](https://docs.victoriametrics.com/victoriametrics/single-server-victoriametrics/) single-node time series database: Prometheus remote-write in, PromQL/MetricsQL out | `x86_64`, `aarch64_generic`, `aarch64_cortex-a53` | 1.156.0-r3 |
 | [victoria-logs](openwrt/victoria-logs) | [VictoriaLogs](https://docs.victoriametrics.com/victorialogs/) single-node log database: syslog, Loki, Elasticsearch and JSON-lines in, LogsQL out | `x86_64`, `aarch64_generic`, `aarch64_cortex-a53` | 1.54.0-r3 |
 | [tinyauth](openwrt/tinyauth) | [Tinyauth](https://tinyauth.app): a login page (local users, OAuth/OIDC, LDAP) in front of web apps, for a reverse proxy's forward auth | `x86_64`, `aarch64_generic`, `aarch64_cortex-a53` | 5.2.0-r1 |
+| [perses](openwrt/perses) | [Perses](https://perses.dev) dashboards, with the datasource and static list variables and the time series and Markdown panels | `x86_64`, `aarch64_generic` | 0.55.1-r1 |
+| [perses-plugin-*](openwrt/perses-plugins) | Its other plugins, one package each: `prometheus`, `victorialogs`, `statchart`, `gaugechart`, `barchart`, `piechart`, `table`, `timeseriestable`, `logstable`, `statushistorychart`, `heatmapchart`, `histogramchart`, `logexplorer` | `noarch` | upstream's, with perses 0.55.1 |
 
 ### Adding the feed
 
@@ -46,7 +48,8 @@ Upgrading a package restarts its service if it is running, so the
 version installed is the version running.
 
 The feed keeps the three newest versions of each package, so the two before
-the current one can be installed by their URLs to roll back. The index lists the newest only.
+the current one can be installed by their URLs to roll back (perses, at
+~26MB a version, keeps two). The index lists the newest only.
 
 ### vmagent
 
@@ -176,6 +179,62 @@ Its jail sees `/etc/tinyauth` read-only: keep secrets there as files and
 point the `*FILE` settings at them (`..._CLIENTSECRETFILE`,
 `TINYAUTH_AUTH_USERSFILE`, ...). It runs as the `tinyauth` user, so make them
 readable to it: `chgrp tinyauth secret && chmod 640 secret`.
+
+### perses
+
+Configured in `/etc/config/perses`. Perses reads every setting of its YAML
+configuration from a `PERSES_*` environment variable too, so the service
+turns its options into them, and takes any other setting as an `env` entry.
+It does not start until `data_dir` is set: its database and its unpacked
+plugins go there.
+
+```sh
+uci set perses.main.data_dir=/mnt/data/perses
+uci commit perses
+apk add perses-plugin-prometheus      # restarts perses
+service perses start
+```
+
+| Option | Default | Variable or flag |
+|--------|---------|------------------|
+| `enabled` | `1` | |
+| `data_dir` | none: required | `<data_dir>/db` its database, `<data_dir>/plugins` its plugins |
+| `listen` | `127.0.0.1:8080` | `-web.listen-address` |
+| `log_level` | `info` | `-log.level` |
+| `gomemlimit` | `256MiB` | `GOMEMLIMIT` |
+| `encryption_key_file` | `/etc/perses/encryption-key`, made on the first start | `PERSES_SECURITY_ENCRYPTION_KEY_FILE` |
+| `auth` | `0` | `PERSES_SECURITY_ENABLE_AUTH`, and its own authorization |
+| `native_login` | `1` | `PERSES_SECURITY_AUTHENTICATION_PROVIDERS_ENABLE_NATIVE` |
+| `guest_action`, `guest_scope` (lists) | none, `*` | one guest permission: what a user without a role may do |
+| `explorer` | `0` | `PERSES_FRONTEND_EXPLORER_ENABLE` |
+| `provisioning` (list) | `/etc/perses/provisioning` | `PERSES_PROVISIONING_FOLDERS_<n>` |
+| `provisioning_interval` | `1h` | `PERSES_PROVISIONING_INTERVAL` |
+| `env` (list) | none | any other `PERSES_*` setting, `NAME=value` |
+| `jail_mount`, `jail_mount_rw` (lists) | none | more paths in its jail |
+
+Each OpenID Connect provider is an `oidc` section (`slug_id`, `name`,
+`issuer`, `client_id`, `client_secret_file`, `list scope`, default `openid
+profile email`, and `disable_pkce`); its callback is
+`<public URL>/api/auth/providers/oidc/<slug_id>/callback`. An `env` entry
+for a variable the options set, by name or by index, is refused.
+
+Its panels, queries and variables are plugins. Perses accepts no dashboard
+without at least one variable plugin and one panel plugin, so the package
+comes with four; the others are `perses-plugin-*` packages, each ~3.6MB, and
+~11MB once Perses unpacks it into `data_dir` on its next start. Installing
+or removing one restarts it.
+
+Dashboards, projects and datasources can be files: JSON or YAML resources
+in a `provisioning` folder, loaded at start and every
+`provisioning_interval`. A file overwrites what the UI changed in its
+resource; removing a file does not remove the resource, which is deleted in
+the UI or through the API.
+
+Its jail sees `/etc/perses` read-only, with its encryption key and any
+secret files (`client_secret_file`); make those readable to its group:
+`chgrp perses secret && chmod 640 secret`. `/etc/perses` is kept across a
+sysupgrade: a lost key makes the datasource secrets in its database
+unreadable. A provisioning folder elsewhere is mounted in its jail.
 
 ## How the feed is built
 

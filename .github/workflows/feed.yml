@@ -122,6 +122,10 @@ jobs:
             missing=$(for p in $all; do
               mk=openwrt/$p/Makefile
               n=$(sed -n 's/^PKG_NAME:=//p' "$mk")
+              # A Makefile of several packages, each its own version
+              # (perses-plugins), has no package PKG_NAME-PKG_VERSION to
+              # look for: it is built when it changes only.
+              grep -qF "BuildPackage,$n))" "$mk" || continue
               v=$(sed -n 's/^PKG_VERSION:=//p' "$mk")
               r=$(sed -n 's/^PKG_RELEASE:=//p' "$mk")
               arches=$(jq -r --arg p "$p" '.packages[$p] | if .build == "noarch" then "noarch" else .arches[] end' feed.json)
@@ -256,7 +260,11 @@ jobs:
           set -eu
           [ -n "$APK_FEED_SIGNING_KEY" ] || { echo "::error::APK_FEED_SIGNING_KEY is not set: refusing to publish unsigned packages"; exit 1; }
           sh scripts/publish.sh file staging site/openwrt
-          sh scripts/publish.sh prune --keep 3 site/openwrt
+          # feed.json's "keep" of a package overrides the 3, for packages
+          # too large to keep three of.
+          sh scripts/publish.sh prune --keep 3 \
+            $(jq -r '.packages | to_entries[] | select(.value.keep) | "--keep-package \(.key)=\(.value.keep)"' feed.json) \
+            site/openwrt
           sh scripts/publish.sh index --manifest feed.json --pubkeys . site/openwrt
 
       # gh-pages holds only the current feed: one commit, replaced on every

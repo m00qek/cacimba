@@ -18,9 +18,10 @@
 #       A file already in the feed is never replaced, so a published version
 #       stays downloadable as it was.
 #
-#   publish.sh prune [--keep N] FEED
+#   publish.sh prune [--keep N] [--keep-package NAME=N]... FEED
 #       Delete all but the newest N (default 3) versions of each package in
 #       each directory of FEED: the current one, and two to roll back to.
+#       --keep-package keeps another number of the package NAME.
 #
 #   publish.sh index [--manifest FEED_JSON] [--pubkeys DIR] FEED
 #       Regenerate and sign every index in FEED. Each index lists only the
@@ -148,18 +149,53 @@ cmd_file() {
 
 # --------------------------------------------------------------------- prune
 
+# name_of FILE: the package name of <name>-<version>-r<N>.apk, as newest.sh
+# parses it.
+name_of() {
+	basename "$1" | sed -E 's/-[0-9][0-9.]*-r[0-9]+\.apk$//'
+}
+
 cmd_prune() {
 	keep=3
-	if [ "${1:-}" = --keep ]; then
-		keep=$2
-		shift 2
-	fi
+	overrides=
+	while [ $# -gt 1 ]; do
+		case "$1" in
+			--keep) keep=$2; shift 2 ;;
+			--keep-package)
+				case "$2" in
+					?*=[1-9]*) overrides="$overrides $2" ;;
+					*) fail "--keep-package: '$2' is not NAME=N" ;;
+				esac
+				shift 2 ;;
+			*) break ;;
+		esac
+	done
 	[ $# -eq 1 ] || usage
 	[ -d "$1" ] || fail "no feed directory $1"
 	for dir in "$1"/*/*/; do
 		set -- "$dir"*.apk
 		[ -f "$1" ] || continue
-		kept=$(sh "$HERE/newest.sh" --keep "$keep" "$@")
+		# Each package with an override is picked on its own, the rest
+		# together. Paths have no spaces.
+		rest=
+		kept=
+		for f in "$@"; do
+			case " $overrides " in
+				*" $(name_of "$f")="*) ;;
+				*) rest="$rest $f" ;;
+			esac
+		done
+		# shellcheck disable=SC2086
+		[ -z "$rest" ] || kept=$(sh "$HERE/newest.sh" --keep "$keep" $rest)
+		for o in $overrides; do
+			mine=
+			for f in "$@"; do
+				[ "$(name_of "$f")" = "${o%%=*}" ] && mine="$mine $f"
+			done
+			# shellcheck disable=SC2086
+			[ -z "$mine" ] || kept="$kept
+$(sh "$HERE/newest.sh" --keep "${o#*=}" $mine)"
+		done
 		for f in "$@"; do
 			if ! printf '%s\n' "$kept" | grep -qxF "$f"; then
 				rm -f "$f"

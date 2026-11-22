@@ -1,0 +1,297 @@
+#!/bin/sh /etc/rc.common
+# perses: a dashboard server. Configured in /etc/config/perses, which becomes
+# its environment: Perses reads every setting of its configuration file from
+# a PERSES_* variable too, lists by index (PERSES_PROVISIONING_FOLDERS_0).
+
+USE_PROCD=1
+START=96
+STOP=10
+
+PROG=/usr/bin/perses
+NAME=perses
+SECRETS=/etc/perses
+ARCHIVES=/usr/share/perses/plugins-archive
+
+# The variables the service sets from its own options, and the prefixes of
+# those it sets by index: an `env` entry for one would contradict an option,
+# so it is refused.
+OWNED="PERSES_DATABASE_FILE_FOLDER PERSES_DATABASE_FILE_EXTENSION \
+PERSES_PLUGIN_PATH PERSES_SECURITY_ENCRYPTION_KEY PERSES_SECURITY_ENCRYPTION_KEY_FILE \
+PERSES_SECURITY_ENABLE_AUTH PERSES_SECURITY_AUTHENTICATION_PROVIDERS_ENABLE_NATIVE \
+PERSES_SECURITY_AUTHORIZATION_PROVIDER_NATIVE_ENABLE \
+PERSES_FRONTEND_EXPLORER_ENABLE PERSES_PROVISIONING_INTERVAL"
+OWNED_PREFIXES="PERSES_PLUGIN_ARCHIVE_PATHS_ PERSES_PROVISIONING_FOLDERS_ \
+PERSES_SECURITY_AUTHENTICATION_PROVIDERS_OIDC_ \
+PERSES_SECURITY_AUTHORIZATION_PROVIDER_NATIVE_GUEST_PERMISSIONS_ \
+PERSES_SECURITY_AUTHORIZATION_GUEST_PERMISSIONS_"
+
+# The options, their types and defaults, in one place: start_service reads
+# them through these, and `ubus call service validate` reports bad values.
+validate_perses_section() {
+	uci_load_validate perses perses "$1" "$2" \
+		'enabled:bool:1' \
+		'data_dir:string' \
+		'listen:string' \
+		'log_level:or("panic", "fatal", "error", "warning", "info", "debug", "trace"):info' \
+		'gomemlimit:string:256MiB' \
+		'encryption_key_file:string:/etc/perses/encryption-key' \
+		'auth:bool:0' \
+		'native_login:bool:1' \
+		'guest_action:list(string)' \
+		'guest_scope:list(string)' \
+		'explorer:bool:0' \
+		'provisioning:list(string)' \
+		'provisioning_interval:string:1h' \
+		'env:list(string)' \
+		'jail_mount:list(string)' \
+		'jail_mount_rw:list(string)'
+}
+
+validate_oidc_section() {
+	uci_load_validate perses oidc "$1" "$2" \
+		'slug_id:string' \
+		'name:string' \
+		'issuer:string' \
+		'client_id:string' \
+		'client_secret_file:string' \
+		'scope:list(string)' \
+		'disable_pkce:bool:0'
+}
+
+validate_perses() {
+	validate_perses_section "$@"
+	validate_oidc_section "$@"
+}
+
+# mount_missing DIR: DIR is under a mount point /etc/config/fstab declares,
+# and that mount is not mounted yet.
+mount_missing() {
+	local target
+	for target in $(procd_get_mountpoints "$1"); do
+		grep -q " $target " /proc/mounts || return 0
+	done
+	return 1
+}
+
+# fs_type DIR: the type of the filesystem DIR is on, from the longest mount
+# point it is under.
+fs_type() {
+	awk -v d="${1%/}/" '{
+		t = ($2 == "/") ? "/" : $2 "/"
+		if (index(d, t) == 1 && length(t) > best) { best = length(t); type = $3 }
+	} END { print type }' /proc/mounts
+}
+
+# check_env ENTRY: an `env` entry is NAME=VALUE, NAME a PERSES_ variable the
+# service does not set itself. Sets env_bad otherwise.
+check_env() {
+	local name="${1%%=*}" p
+	case "$1" in
+		PERSES_*=*) ;;
+		*) echo "$NAME: env entry '$name' is not PERSES_<SETTING>=<value>" >&2; env_bad=1; return ;;
+	esac
+	case " $OWNED " in
+		*" $name "*) echo "$NAME: env entry $name is set from an option of /etc/config/$NAME" >&2; env_bad=1; return ;;
+	esac
+	for p in $OWNED_PREFIXES; do
+		case "$name" in
+			"$p"*) echo "$NAME: env entry $name is set from an option of /etc/config/$NAME" >&2; env_bad=1; return ;;
+		esac
+	done
+}
+
+# add_env ENTRY: one `env` entry, whole: values may contain spaces.
+add_env() {
+	procd_append_param env "$1"
+}
+
+# check_oidc SECTION RESULT: an oidc section is valid and names its
+# provider. Sets oidc_bad otherwise.
+check_oidc() {
+	if [ "$2" != 0 ]; then
+		echo "$NAME: invalid oidc section $1 in /etc/config/$NAME" >&2
+		oidc_bad=1
+	elif [ -z "$slug_id" ] || [ -z "$issuer" ] || [ -z "$client_id" ]; then
+		echo "$NAME: oidc section $1 needs slug_id, issuer and client_id" >&2
+		oidc_bad=1
+	fi
+}
+
+# add_oidc SECTION: the provider it describes, as the next index.
+add_oidc() {
+	local p="PERSES_SECURITY_AUTHENTICATION_PROVIDERS_OIDC_${oidc_count}_" s i=0
+
+	procd_append_param env "${p}SLUG_ID=$slug_id" "${p}ISSUER=$issuer" \
+		"${p}CLIENT_ID=$client_id" "${p}NAME=${name:-$slug_id}"
+	[ -n "$client_secret_file" ] &&
+		procd_append_param env "${p}CLIENT_SECRET_FILE=$client_secret_file"
+	[ "$disable_pkce" = 1 ] && procd_append_param env "${p}DISABLE_PKCE=true"
+	for s in ${scope:-openid profile email}; do
+		procd_append_param env "${p}SCOPES_${i}=$s"
+		i=$((i + 1))
+	done
+	oidc_count=$((oidc_count + 1))
+}
+
+# make_key FILE: the 32 characters Perses takes as its key (16 random bytes
+# in hex), readable by its group only.
+make_key() {
+	mkdir -p "$(dirname "$1")"
+	( umask 027; head -c 16 /dev/urandom | hexdump -ve '1/1 "%02x"' > "$1" )
+	chgrp "$NAME" "$1"
+	echo "$NAME: made a new encryption key, $1" >&2
+}
+
+# reset_plugins DIR: Perses unpacks each archive into DIR once and keeps it,
+# so when the set of installed archives changes, DIR starts over: no plugin
+# of a version since removed stays loaded.
+reset_plugins() {
+	local now
+	now=$(ls "$ARCHIVES")
+	[ -f "$1/.archives" ] && [ "$(cat "$1/.archives")" = "$now" ] && return
+	rm -rf "$1"
+	mkdir -p "$1"
+	printf '%s\n' "$now" > "$1/.archives"
+	chown -R "$NAME:$NAME" "$1"
+}
+
+start_perses() {
+	local arg i env_bad= oidc_bad= oidc_count bool_auth=false bool_native=false bool_explorer=false
+
+	if [ "$2" != 0 ]; then
+		echo "$NAME: invalid configuration in /etc/config/$NAME, not starting" >&2
+		return 1
+	fi
+	[ "$enabled" = 1 ] || return 0
+	# Set here, not in the spec: uci_load_validate cuts a default at its
+	# first ':'.
+	: "${listen:=127.0.0.1:8080}"
+
+	if [ -z "$data_dir" ]; then
+		echo "$NAME: no data_dir in /etc/config/$NAME, not starting" >&2
+		return 1
+	fi
+	config_load perses
+	config_list_foreach main env check_env
+	oidc_bad=
+	config_foreach validate_oidc_section oidc check_oidc
+	if [ -n "$env_bad" ] || [ -n "$oidc_bad" ]; then
+		echo "$NAME: invalid configuration in /etc/config/$NAME, not starting" >&2
+		return 1
+	fi
+	# Its database on storage that is not mounted yet would land on the
+	# overlay. service_triggers starts it when the mount appears.
+	if mount_missing "$data_dir"; then
+		echo "$NAME: $data_dir is not mounted yet, waiting for it" >&2
+		return 0
+	fi
+	case "$(fs_type "$data_dir")" in
+		tmpfs | ramfs)
+			echo "$NAME: $data_dir is in RAM: its dashboards and users will not survive a reboot" >&2 ;;
+	esac
+
+	mkdir -p "$data_dir/db"
+	# Handed over once, when it is not its own yet.
+	[ "$(ls -ld "$data_dir" | awk '{print $3}')" = $NAME ] ||
+		chown -R "$NAME:$NAME" "$data_dir"
+	reset_plugins "$data_dir/plugins"
+	[ -s "$encryption_key_file" ] || make_key "$encryption_key_file"
+
+	[ "$auth" = 1 ] && bool_auth=true
+	[ "$native_login" = 1 ] && bool_native=true
+	[ "$explorer" = 1 ] && bool_explorer=true
+
+	procd_open_instance
+	procd_set_param command "$PROG" \
+		-web.listen-address="$listen" \
+		-log.level="$log_level"
+	procd_set_param env \
+		PERSES_DATABASE_FILE_FOLDER="$data_dir/db" \
+		PERSES_DATABASE_FILE_EXTENSION=json \
+		PERSES_PLUGIN_PATH="$data_dir/plugins" \
+		PERSES_PLUGIN_ARCHIVE_PATHS_0="$ARCHIVES" \
+		PERSES_SECURITY_ENCRYPTION_KEY_FILE="$encryption_key_file" \
+		PERSES_SECURITY_ENABLE_AUTH="$bool_auth" \
+		PERSES_SECURITY_AUTHENTICATION_PROVIDERS_ENABLE_NATIVE="$bool_native" \
+		PERSES_SECURITY_AUTHORIZATION_PROVIDER_NATIVE_ENABLE="$bool_auth" \
+		PERSES_FRONTEND_EXPLORER_ENABLE="$bool_explorer" \
+		PERSES_PROVISIONING_INTERVAL="$provisioning_interval"
+	[ -n "$gomemlimit" ] && procd_append_param env GOMEMLIMIT="$gomemlimit"
+	i=0
+	for arg in $provisioning; do
+		procd_append_param env "PERSES_PROVISIONING_FOLDERS_${i}=$arg"
+		i=$((i + 1))
+	done
+	# One guest permission: these actions on these scopes. A scope is often
+	# `*`, which must not become the names of files.
+	set -f
+	if [ -n "$guest_action" ]; then
+		i=0
+		for arg in $guest_action; do
+			procd_append_param env "PERSES_SECURITY_AUTHORIZATION_PROVIDER_NATIVE_GUEST_PERMISSIONS_0_ACTIONS_${i}=$arg"
+			i=$((i + 1))
+		done
+		i=0
+		for arg in ${guest_scope:-*}; do
+			procd_append_param env "PERSES_SECURITY_AUTHORIZATION_PROVIDER_NATIVE_GUEST_PERMISSIONS_0_SCOPES_${i}=$arg"
+			i=$((i + 1))
+		done
+	fi
+	set +f
+	oidc_count=0
+	config_foreach validate_oidc_section oidc add_oidc
+	config_list_foreach main env add_env
+
+	# Its own mount namespace: its key and secret files and the plugin
+	# archives read-only, data_dir writable, and what it needs to reach
+	# datasources and OIDC providers by name over TLS.
+	procd_add_jail "$NAME" log procfs requirejail
+	procd_add_jail_mount "$SECRETS" "$ARCHIVES" /etc/ssl/certs /etc/hosts
+	# The jail is required, so a path that does not exist must not be in it.
+	for arg in /etc/resolv.conf /tmp/resolv.conf /tmp/resolv.conf.d; do
+		[ -e "$arg" ] && procd_add_jail_mount "$arg"
+	done
+	case "$encryption_key_file" in
+		"$SECRETS"/*) ;;
+		*) procd_add_jail_mount "$encryption_key_file" ;;
+	esac
+	for arg in $provisioning; do
+		case "$arg" in
+			"$SECRETS" | "$SECRETS"/*) ;;
+			*) [ -e "$arg" ] && procd_add_jail_mount "$arg" ;;
+		esac
+	done
+	procd_add_jail_mount_rw "$data_dir"
+	for arg in $jail_mount; do
+		procd_add_jail_mount "$arg"
+	done
+	for arg in $jail_mount_rw; do
+		procd_add_jail_mount_rw "$arg"
+	done
+
+	procd_set_param user "$NAME"
+	procd_set_param group "$NAME"
+	procd_set_param no_new_privs 1
+	procd_set_param term_timeout 15
+	procd_set_param stdout 1
+	procd_set_param stderr 1
+	# Its first start unpacks every plugin, which takes a while on a router.
+	procd_set_param respawn 3600 5 0
+	procd_close_instance
+}
+
+start_service() {
+	validate_perses_section main start_perses
+}
+
+service_triggers() {
+	local data_dir
+
+	procd_add_reload_trigger perses
+
+	config_load perses
+	config_get data_dir main data_dir
+	[ -n "$data_dir" ] && procd_add_restart_mount_trigger "$data_dir"
+
+	procd_add_validation validate_perses
+}
