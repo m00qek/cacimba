@@ -2,7 +2,7 @@ include $(TOPDIR)/rules.mk
 
 PKG_NAME:=perses
 PKG_VERSION:=0.55.1
-PKG_RELEASE:=1
+PKG_RELEASE:=2
 
 # Upstream's release build: a tarball per CPU holding the server, percli and
 # the plugins it bundles. Only the server is packaged; each plugin is its own

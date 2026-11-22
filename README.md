@@ -25,7 +25,7 @@ CI fetches it, checks the hash, packages it, and publishes the result.
 | [victoria-metrics](openwrt/victoria-metrics) | [VictoriaMetrics](https://docs.victoriametrics.com/victoriametrics/single-server-victoriametrics/) single-node time series database: Prometheus remote-write in, PromQL/MetricsQL out | `x86_64`, `aarch64_generic`, `aarch64_cortex-a53` | 1.156.0-r3 |
 | [victoria-logs](openwrt/victoria-logs) | [VictoriaLogs](https://docs.victoriametrics.com/victorialogs/) single-node log database: syslog, Loki, Elasticsearch and JSON-lines in, LogsQL out | `x86_64`, `aarch64_generic`, `aarch64_cortex-a53` | 1.54.0-r3 |
 | [tinyauth](openwrt/tinyauth) | [Tinyauth](https://tinyauth.app): a login page (local users, OAuth/OIDC, LDAP) in front of web apps, for a reverse proxy's forward auth | `x86_64`, `aarch64_generic`, `aarch64_cortex-a53` | 5.2.0-r1 |
-| [perses](openwrt/perses) | [Perses](https://perses.dev) dashboards, with the datasource and static list variables and the time series and Markdown panels | `x86_64`, `aarch64_generic` | 0.55.1-r1 |
+| [perses](openwrt/perses) | [Perses](https://perses.dev) dashboards, with the datasource and static list variables and the time series and Markdown panels | `x86_64`, `aarch64_generic` | 0.55.1-r2 |
 | [perses-plugin-*](openwrt/perses-plugins) | Its other plugins, one package each: `prometheus`, `victorialogs`, `statchart`, `gaugechart`, `barchart`, `piechart`, `table`, `timeseriestable`, `logstable`, `statushistorychart`, `heatmapchart`, `histogramchart`, `logexplorer` | `noarch` | upstream's, with perses 0.55.1 |
 
 ### Adding the feed
@@ -209,6 +209,7 @@ service perses start
 | `explorer` | `0` | `PERSES_FRONTEND_EXPLORER_ENABLE` |
 | `provisioning` (list) | `/etc/perses/provisioning` | `PERSES_PROVISIONING_FOLDERS_<n>` |
 | `provisioning_interval` | `1h` | `PERSES_PROVISIONING_INTERVAL` |
+| `datasource_allow` (list) | none | `PERSES_DATASOURCE_PROXY_ALLOWED_NETWORKS_<n>`: networks datasources may point at besides the default ones |
 | `env` (list) | none | any other `PERSES_*` setting, `NAME=value` |
 | `jail_mount`, `jail_mount_rw` (lists) | none | more paths in its jail |
 
@@ -217,6 +218,12 @@ Each OpenID Connect provider is an `oidc` section (`slug_id`, `name`,
 profile email`, and `disable_pkce`); its callback is
 `<public URL>/api/auth/providers/oidc/<slug_id>/callback`. An `env` entry
 for a variable the options set, by name or by index, is refused.
+
+Perses proxies every query, and denies destinations on loopback and
+link-local: a datasource on `127.0.0.1`, such as victoria-metrics with its
+default `listen`, needs `datasource_allow '127.0.0.0/8'`. That lets whoever
+may edit datasources reach every service on loopback through Perses, LuCI
+included, so turn `auth` on with it.
 
 Its panels, queries and variables are plugins. Perses accepts no dashboard
 without at least one variable plugin and one panel plugin, so the package

@@ -23,7 +23,8 @@ PERSES_FRONTEND_EXPLORER_ENABLE PERSES_PROVISIONING_INTERVAL"
 OWNED_PREFIXES="PERSES_PLUGIN_ARCHIVE_PATHS_ PERSES_PROVISIONING_FOLDERS_ \
 PERSES_SECURITY_AUTHENTICATION_PROVIDERS_OIDC_ \
 PERSES_SECURITY_AUTHORIZATION_PROVIDER_NATIVE_GUEST_PERMISSIONS_ \
-PERSES_SECURITY_AUTHORIZATION_GUEST_PERMISSIONS_"
+PERSES_SECURITY_AUTHORIZATION_GUEST_PERMISSIONS_ \
+PERSES_DATASOURCE_PROXY_ALLOWED_NETWORKS_"
 
 # The options, their types and defaults, in one place: start_service reads
 # them through these, and `ubus call service validate` reports bad values.
@@ -42,6 +43,7 @@ validate_perses_section() {
 		'explorer:bool:0' \
 		'provisioning:list(string)' \
 		'provisioning_interval:string:1h' \
+		'datasource_allow:list(string)' \
 		'env:list(string)' \
 		'jail_mount:list(string)' \
 		'jail_mount_rw:list(string)'
@@ -237,6 +239,14 @@ start_perses() {
 			i=$((i + 1))
 		done
 	fi
+	# Networks its datasource proxy may reach besides the default ones:
+	# Perses denies loopback and link-local, where the router's own
+	# services listen.
+	i=0
+	for arg in $datasource_allow; do
+		procd_append_param env "PERSES_DATASOURCE_PROXY_ALLOWED_NETWORKS_${i}=$arg"
+		i=$((i + 1))
+	done
 	set +f
 	oidc_count=0
 	config_foreach validate_oidc_section oidc add_oidc

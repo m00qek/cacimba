@@ -147,6 +147,7 @@ uci set perses.main.auth=1
 uci set perses.main.native_login=0
 uci add_list perses.main.guest_action=read
 uci set perses.main.explorer=1
+uci add_list perses.main.datasource_allow=127.0.0.0/8
 uci add perses oidc >/dev/null
 uci set perses.@oidc[-1].slug_id=test
 uci set perses.@oidc[-1].name='Test ID'
@@ -163,6 +164,7 @@ want \
 	"env PERSES_SECURITY_AUTHORIZATION_PROVIDER_NATIVE_GUEST_PERMISSIONS_0_ACTIONS_0=read" \
 	"env PERSES_SECURITY_AUTHORIZATION_PROVIDER_NATIVE_GUEST_PERMISSIONS_0_SCOPES_0=*" \
 	"env PERSES_FRONTEND_EXPLORER_ENABLE=true" \
+	"env PERSES_DATASOURCE_PROXY_ALLOWED_NETWORKS_0=127.0.0.0/8" \
 	"env ${p}SLUG_ID=test" \
 	"env ${p}NAME=Test ID" \
 	"env ${p}ISSUER=https://id.example.com" \
@@ -181,7 +183,8 @@ uci commit perses
 
 # An env entry for a variable an option sets, by name or by index, is
 # refused, and so is one that is not a PERSES_ setting.
-for bad in PERSES_PLUGIN_PATH=/tmp PERSES_PROVISIONING_FOLDERS_1=/tmp PATH=/tmp; do
+for bad in PERSES_PLUGIN_PATH=/tmp PERSES_PROVISIONING_FOLDERS_1=/tmp \
+	PERSES_DATASOURCE_PROXY_ALLOWED_NETWORKS_0=10.0.0.0/8 PATH=/tmp; do
 	uci add_list perses.main.env="$bad"
 	uci commit perses
 	out=$(start) && fail "started with an env entry $bad"
