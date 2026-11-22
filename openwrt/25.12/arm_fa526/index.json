@@ -1,0 +1,19 @@
+{
+  "version": 2,
+  "architecture": "arm_fa526",
+  "packages": {
+    "perses-plugin-barchart": "0.14.1-r1",
+    "perses-plugin-gaugechart": "0.14.1-r1",
+    "perses-plugin-heatmapchart": "0.6.1-r1",
+    "perses-plugin-histogramchart": "0.13.1-r1",
+    "perses-plugin-logexplorer": "0.2.1-r1",
+    "perses-plugin-logstable": "0.4.1-r1",
+    "perses-plugin-piechart": "0.15.1-r1",
+    "perses-plugin-prometheus": "0.59.1-r1",
+    "perses-plugin-statchart": "0.15.1-r1",
+    "perses-plugin-statushistorychart": "0.14.1-r1",
+    "perses-plugin-table": "0.14.1-r1",
+    "perses-plugin-timeseriestable": "0.13.1-r1",
+    "perses-plugin-victorialogs": "0.5.1-r1"
+  }
+}
